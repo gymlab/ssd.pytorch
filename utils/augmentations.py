@@ -225,6 +225,7 @@ class RandomSampleCrop(object):
             # sample a patch s.t. MIN jaccard w/ obj in .1,.3,.4,.7,.9
             (0.1, None),
             (0.3, None),
+            (0.5, None),
             (0.7, None),
             (0.9, None),
             # randomly sample a patch
@@ -233,6 +234,10 @@ class RandomSampleCrop(object):
 
     def __call__(self, image, boxes=None, labels=None):
         height, width, _ = image.shape
+
+        if len(boxes) == 0:
+            return image, boxes, labels
+
         while True:
             # randomly choose a mode
             mode = random.choice(self.sample_options)

@@ -1,5 +1,9 @@
-# -*- coding: utf-8 -*-
 import torch
+import torch.nn as nn
+import math
+import numpy as np
+if torch.cuda.is_available():
+    import torch.backends.cudnn as cudnn
 
 
 def point_form(boxes):
@@ -67,6 +71,18 @@ def jaccard(box_a, box_b):
     union = area_a + area_b - inter
     return inter / union  # [A,B]
 
+def matrix_iou(a,b):
+    """
+    return iou of a and b, numpy version for data augenmentation
+    """
+    lt = np.maximum(a[:, np.newaxis, :2], b[:, :2])
+    rb = np.minimum(a[:, np.newaxis, 2:], b[:, 2:])
+
+    area_i = np.prod(rb - lt, axis=2) * (lt < rb).all(axis=2)
+    area_a = np.prod(a[:, 2:] - a[:, :2], axis=1)
+    area_b = np.prod(b[:, 2:] - b[:, :2], axis=1)
+    return area_i / (area_a[:, np.newaxis] + area_b - area_i)
+
 
 def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
     """Match each prior box with the ground truth box of the highest jaccard
@@ -85,36 +101,31 @@ def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
     Return:
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
-    if truths.size(0) > 0:
-        # jaccard index
-        overlaps = jaccard(
-            truths,
-            point_form(priors)
-        )
-        # (Bipartite Matching)
-        # [1,num_objects] best prior for each ground truth
-        best_prior_overlap, best_prior_idx = overlaps.max(1, keepdim=True)
-        # [1,num_priors] best ground truth for each prior
-        best_truth_overlap, best_truth_idx = overlaps.max(0, keepdim=True)
-        best_truth_idx.squeeze_(0)
-        best_truth_overlap.squeeze_(0)
-        best_prior_idx.squeeze_(1)
-        best_prior_overlap.squeeze_(1)
-        best_truth_overlap.index_fill_(0, best_prior_idx, 2)  # ensure best prior
-        # TODO refactor: index  best_prior_idx with long tensor
-        # ensure every gt matches with its prior of max overlap
-        for j in range(best_prior_idx.size(0)):
-            best_truth_idx[best_prior_idx[j]] = j
-        matches = truths[best_truth_idx]  # Shape: [num_priors,4]
-        conf = labels[best_truth_idx]  # Shape: [num_priors]
-        conf[best_truth_overlap < threshold] = 0  # label as background
-        loc = encode(matches, priors, variances)
-        loc_t[idx] = loc  # [num_priors,4] encoded offsets to learn
-        conf_t[idx] = conf  # [num_priors] top class label for each prior
-    else:
-        num_priors = priors.size(0)
-        loc_t[idx] = torch.zeros([num_priors, 4], dtype=torch.float)
-        conf_t[idx] = torch.zeros([num_priors], dtype=torch.float)
+    # jaccard index
+    overlaps = jaccard(
+        truths,
+        point_form(priors)
+    )
+    # (Bipartite Matching)
+    # [1,num_objects] best prior for each ground truth
+    best_prior_overlap, best_prior_idx = overlaps.max(1, keepdim=True)
+    # [1,num_priors] best ground truth for each prior
+    best_truth_overlap, best_truth_idx = overlaps.max(0, keepdim=True)
+    best_truth_idx.squeeze_(0)
+    best_truth_overlap.squeeze_(0)
+    best_prior_idx.squeeze_(1)
+    best_prior_overlap.squeeze_(1)
+    best_truth_overlap.index_fill_(0, best_prior_idx, 2)  # ensure best prior
+    # TODO refactor: index  best_prior_idx with long tensor
+    # ensure every gt matches with its prior of max overlap
+    for j in range(best_prior_idx.size(0)):
+        best_truth_idx[best_prior_idx[j]] = j
+    matches = truths[best_truth_idx]          # Shape: [num_priors,4]
+    conf = labels[best_truth_idx]          # Shape: [num_priors]
+    conf[best_truth_overlap < threshold] = 0  # label as background
+    loc = encode(matches, priors, variances)
+    loc_t[idx] = loc    # [num_priors,4] encoded offsets to learn
+    conf_t[idx] = conf  # [num_priors] top class label for each prior
 
 
 def encode(matched, priors, variances):
@@ -136,10 +147,34 @@ def encode(matched, priors, variances):
     g_cxcy /= (variances[0] * priors[:, 2:])
     # match wh / prior wh
     g_wh = (matched[:, 2:] - matched[:, :2]) / priors[:, 2:]
-    g_wh = torch.log(g_wh + 1e-5) / variances[1]
+    g_wh = torch.log(g_wh) / variances[1]
     # return target for smooth_l1_loss
     return torch.cat([g_cxcy, g_wh], 1)  # [num_priors,4]
 
+
+def encode_multi(matched, priors, offsets, variances):
+    """Encode the variances from the priorbox layers into the ground truth boxes
+    we have matched (based on jaccard overlap) with the prior boxes.
+    Args:
+        matched: (tensor) Coords of ground truth for each prior in point-form
+            Shape: [num_priors, 4].
+        priors: (tensor) Prior boxes in center-offset form
+            Shape: [num_priors,4].
+        variances: (list[float]) Variances of priorboxes
+    Return:
+        encoded boxes (tensor), Shape: [num_priors, 4]
+    """
+
+    # dist b/t match center and prior's center
+    g_cxcy = (matched[:, :2] + matched[:, 2:])/2 - priors[:, :2] - offsets[:,:2]
+    # encode variance
+    #g_cxcy /= (variances[0] * priors[:, 2:])
+    g_cxcy.div_(variances[0] * offsets[:, 2:])
+    # match wh / prior wh
+    g_wh = (matched[:, 2:] - matched[:, :2]) / priors[:, 2:]
+    g_wh = torch.log(g_wh) / variances[1]
+    # return target for smooth_l1_loss
+    return torch.cat([g_cxcy, g_wh], 1)  # [num_priors,4]
 
 # Adapted from https://github.com/Hakuyume/chainer-ssd
 def decode(loc, priors, variances):
@@ -162,6 +197,25 @@ def decode(loc, priors, variances):
     boxes[:, 2:] += boxes[:, :2]
     return boxes
 
+def decode_multi(loc, priors, offsets, variances):
+    """Decode locations from predictions using priors to undo
+    the encoding we did for offset regression at train time.
+    Args:
+        loc (tensor): location predictions for loc layers,
+            Shape: [num_priors,4]
+        priors (tensor): Prior boxes in center-offset form.
+            Shape: [num_priors,4].
+        variances: (list[float]) Variances of priorboxes
+    Return:
+        decoded bounding box predictions
+    """
+
+    boxes = torch.cat((
+        priors[:, :2] + offsets[:,:2]+ loc[:, :2] * variances[0] * offsets[:, 2:],
+        priors[:, 2:] * torch.exp(loc[:, 2:] * variances[1])), 1)
+    boxes[:, :2] -= boxes[:, 2:] / 2
+    boxes[:, 2:] += boxes[:, :2]
+    return boxes
 
 def log_sum_exp(x):
     """Utility function for computing log_sum_exp while determining
@@ -189,7 +243,7 @@ def nms(boxes, scores, overlap=0.5, top_k=200):
         The indices of the kept boxes with respect to num_priors.
     """
 
-    keep = scores.new(scores.size(0)).zero_().long()
+    keep = torch.Tensor(scores.size(0)).fill_(0).long()
     if boxes.numel() == 0:
         return keep
     x1 = boxes[:, 0]
@@ -242,3 +296,5 @@ def nms(boxes, scores, overlap=0.5, top_k=200):
         # keep only elements with an IoU <= overlap
         idx = idx[IoU.le(overlap)]
     return keep, count
+
+
