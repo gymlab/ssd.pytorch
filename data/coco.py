@@ -174,18 +174,24 @@ class COCODetection(data.Dataset):
                    target is the object returned by ``coco.loadAnns``.
         """
         img_id = self.ids[index]
-        target = self.annotations[index]
+        target = []
+        if self.annotations:
+            target = self.annotations[index]
         img = cv2.imread(img_id, cv2.IMREAD_COLOR)
         height, width, _ = img.shape
 
         if self.target_transform is not None:
             target = self.target_transform(target, width, height)
         if self.transform is not None:
-            target = np.array(target)
-            img, boxes, labels = self.transform(img, target[:, :4], target[:, 4])
-            # to rgb
-            img = img[:, :, (2, 1, 0)]
-            target = np.hstack((boxes, np.expand_dims(labels, axis=1)))
+            if not self.annotations:
+                img, _, _ = self.transform(img)
+                img = img[:, :, (2, 1, 0)]
+            else:
+                target = np.array(target)
+                img, boxes, labels = self.transform(img, target[:, :4], target[:, 4])
+                # to rgb
+                img = img[:, :, (2, 1, 0)]
+                target = np.hstack((boxes, np.expand_dims(labels, axis=1)))
 
         return torch.from_numpy(img).permute(2, 0, 1), target, height, width
 
@@ -221,6 +227,7 @@ class COCODetection(data.Dataset):
         self._write_coco_results_file(all_boxes, res_file)
         # Only do evaluation on non-test sets
         if self.coco_name.find('test') == -1:
+            print('not text mode, do evaluation')
             self._do_detection_eval(res_file, output_dir)
         # Optionally cleanup results json file
 
@@ -279,6 +286,7 @@ class COCODetection(data.Dataset):
         for cls_ind, cls in enumerate(self._classes):
             if cls == '__background__':
                 continue
+
             print('Collecting {} results ({:d}/{:d})'.format(cls, cls_ind, self.num_classes ))
             coco_cat_id = self._class_to_coco_cat_id[cls]
             results.extend(self._coco_results_one_category(all_boxes[cls_ind], coco_cat_id))
@@ -289,9 +297,13 @@ class COCODetection(data.Dataset):
     def _coco_results_one_category(self, boxes, cat_id):
         results = []
         for im_ind, index in enumerate(self.image_indexes):
-            dets = boxes[im_ind].astype(np.float)
+            # dets = (boxes[im_ind]).astype(np.float)
+            dets = boxes[im_ind]
             if dets == []:
                 continue
+
+            dets = boxes[im_ind].astype(np.float)
+
             scores = dets[:, -1]
             xs = dets[:, 0]
             ys = dets[:, 1]
