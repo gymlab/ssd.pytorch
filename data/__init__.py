@@ -1,5 +1,5 @@
-from .voc0712 import VOCDetection, VOCAnnotationTransform, VOC_CLASSES, VOC_ROOT
-from .coco import COCODetection, COCOAnnotationTransform, COCO_ROOT
+from .voc0712 import VOCDetection, VOCAnnotationTransform, VOC_CLASSES, VOC_ROOT, VOC_OBJ_MIN, VOC_OBJ_MAX
+from .coco import COCODetection, COCOAnnotationTransform, COCO_ROOT, COCO_OBJ_MIN, COCO_OBJ_MAX
 from .config import *
 import torch
 import cv2

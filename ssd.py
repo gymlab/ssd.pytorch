@@ -5,6 +5,7 @@ from torch.autograd import Variable
 from layers import *
 from data import voc, coco
 import os
+import matplotlib.pyplot as plt
 
 
 class SSD(nn.Module):
@@ -43,6 +44,9 @@ class SSD(nn.Module):
         self.loc = nn.ModuleList(head[0])
         self.conf = nn.ModuleList(head[1])
 
+        # Layer for depth
+        self.geo = nn.ModuleList(head[2])
+
         if phase == 'test':
             self.softmax = nn.Softmax(dim=-1)
             self.detect = Detect(num_classes, 0, 200, 0.01, 0.45)
@@ -69,6 +73,7 @@ class SSD(nn.Module):
         sources = list()
         loc = list()
         conf = list()
+        geo = list()
 
         # apply vgg up to conv4_3 relu
         for k in range(23):
@@ -89,12 +94,23 @@ class SSD(nn.Module):
                 sources.append(x)
 
         # apply multibox head to source layers
-        for (x, l, c) in zip(sources, self.loc, self.conf):
+        for (x, l, c, g) in zip(sources, self.loc, self.conf, self.geo):
             loc.append(l(x).permute(0, 2, 3, 1).contiguous())
             conf.append(c(x).permute(0, 2, 3, 1).contiguous())
+            if self.phase == 'train':
+                geo.append(g(x).permute(0, 2, 3, 1).contiguous())
+
+        # if self.phase == "train":
+        #     geo.append(self.geo[0](sources[0]).permute(0, 2, 3, 1).contiguous())
+        # else:
+        #     geo = self.geo[0](sources[0])
 
         loc = torch.cat([o.view(o.size(0), -1) for o in loc], 1)
         conf = torch.cat([o.view(o.size(0), -1) for o in conf], 1)
+
+        if self.phase == "train":
+            geo = torch.cat([o.view(o.size(0), -1) for o in geo], 1)
+
         if self.phase == "test":
             output = self.detect(
                 loc.view(loc.size(0), -1, 4),                   # loc preds
@@ -106,6 +122,7 @@ class SSD(nn.Module):
             output = (
                 loc.view(loc.size(0), -1, 4),
                 conf.view(conf.size(0), -1, self.num_classes),
+                geo.view(geo.size(0), -1, 1),
                 self.priors
             )
         return output
@@ -166,18 +183,22 @@ def add_extras(cfg, i, batch_norm=False):
 def multibox(vgg, extra_layers, cfg, num_classes):
     loc_layers = []
     conf_layers = []
+    geo_layers = []
     vgg_source = [21, -2]
+    # geo_layers += [nn.Conv2d(vgg[21].out_channels, cfg[0], kernel_size=3, padding=1)]
     for k, v in enumerate(vgg_source):
         loc_layers += [nn.Conv2d(vgg[v].out_channels,
                                  cfg[k] * 4, kernel_size=3, padding=1)]
         conf_layers += [nn.Conv2d(vgg[v].out_channels,
                         cfg[k] * num_classes, kernel_size=3, padding=1)]
+        geo_layers += [nn.Conv2d(vgg[v].out_channels, cfg[k], kernel_size=3, padding=1)]
     for k, v in enumerate(extra_layers[1::2], 2):
         loc_layers += [nn.Conv2d(v.out_channels, cfg[k]
                                  * 4, kernel_size=3, padding=1)]
         conf_layers += [nn.Conv2d(v.out_channels, cfg[k]
                                   * num_classes, kernel_size=3, padding=1)]
-    return vgg, extra_layers, (loc_layers, conf_layers)
+        geo_layers += [nn.Conv2d(v.out_channels, cfg[k], kernel_size=3, padding=1)]
+    return vgg, extra_layers, (loc_layers, conf_layers, geo_layers)
 
 
 base = {

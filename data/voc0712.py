@@ -24,6 +24,34 @@ VOC_CLASSES = ('__background__',  # always index 0
     'motorbike', 'person', 'pottedplant',
     'sheep', 'sofa', 'train', 'tvmonitor')
 
+VOC_OBJ_MAX = (10000.,
+    85., 2., 1., 85.,
+    .4, 6., 4., .3, 1.,
+    3., 3., 1., 3.,
+    3., 2., 15.,
+    2., 4., 20., 1.5)
+
+VOC_OBJ_MIN = (.05,
+    2., 1., .1, 1.,
+    .1, 2., 1., .1, .3,
+    .5, .5, .2, .5,
+    1., .3, .1,
+    .3, 1., 4., .1)
+
+VOC_OBJ_MEAN = (.0,
+    40., 1.6, 0.3, 40.,
+    0.25, 4.4, 2.5, 0.25, 0.7,
+    1.8, 1.8, 0.5, 1.8,
+    1.9, 1.1, 1.,
+    1.1, 2.5, 13., 0.7)
+
+VOC_OBJ_STD = (.0,
+    14., 0.2, 0.15, 14.,
+    0.05, 0.8, 0.5, 0.05, 0.1,
+    0.5, 0.5, 0.15, 0.5,
+    0.3, 0.3, 4.,
+    0.3, 0.5, 3., 0.3)
+
 # note: if you used our download scripts, this should be right
 VOC_ROOT = osp.join(HOME, "data/VOCdevkit/")
 

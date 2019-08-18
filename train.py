@@ -12,6 +12,7 @@ import torch.optim as optim
 import torch.backends.cudnn as cudnn
 import torch.nn.init as init
 import torch.utils.data as data
+import math
 import numpy as np
 import argparse
 
@@ -23,9 +24,9 @@ def str2bool(v):
 parser = argparse.ArgumentParser(
     description='Single Shot MultiBox Detector Training With Pytorch')
 train_set = parser.add_mutually_exclusive_group()
-parser.add_argument('--dataset', default='COCO', choices=['VOC', 'COCO'],
+parser.add_argument('--dataset', default='VOC', choices=['VOC', 'COCO'],
                     type=str, help='VOC or COCO')
-parser.add_argument('--dataset_root', default=COCO_ROOT,
+parser.add_argument('--dataset_root', default=VOC_ROOT,
                     help='Dataset root directory path')
 parser.add_argument('--basenet', default='vgg16_reducedfc.pth',
                     help='Pretrained base model')
@@ -47,7 +48,7 @@ parser.add_argument('--weight_decay', default=5e-4, type=float,
                     help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
-parser.add_argument('--visdom', default=False, type=str2bool,
+parser.add_argument('--visdom', default=True, type=str2bool,
                     help='Use visdom for loss visualization')
 parser.add_argument('--save_folder', default='weights/',
                     help='Directory for saving checkpoint models')
@@ -66,6 +67,10 @@ else:
 
 if not os.path.exists(args.save_folder):
     os.mkdir(args.save_folder)
+
+if args.visdom:
+    import visdom
+    viz = visdom.Visdom()
 
 
 def train():
@@ -87,10 +92,6 @@ def train():
         dataset = VOCDetection(root=args.dataset_root,
                                transform=SSDAugmentation(cfg['min_dim'],
                                                          MEANS))
-
-    if args.visdom:
-        import visdom
-        viz = visdom.Visdom()
 
     ssd_net = build_ssd('train', cfg['min_dim'], cfg['num_classes'])
     net = ssd_net
@@ -115,7 +116,7 @@ def train():
         # initialize newly added layers' weights with xavier method
         ssd_net.extras.apply(weights_init)
         ssd_net.loc.apply(weights_init)
-        ssd_net.conf.apply(weights_init)
+        ssd_net.conf.apply(weights_init_cls)
 
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum,
                           weight_decay=args.weight_decay)
@@ -138,7 +139,7 @@ def train():
 
     if args.visdom:
         vis_title = 'SSD.PyTorch on ' + dataset.name
-        vis_legend = ['Loc Loss', 'Conf Loss', 'Total Loss']
+        vis_legend = ['Loc Loss', 'Conf Loss', 'Geometric Loss', 'Total Loss']
         iter_plot = create_vis_plot('Iteration', 'Loss', vis_title, vis_legend)
         epoch_plot = create_vis_plot('Epoch', 'Loss', vis_title, vis_legend)
 
@@ -172,6 +173,8 @@ def train():
         # backprop
         optimizer.zero_grad()
         loss_l, loss_c = criterion(out, targets)
+        # if iteration < 500:
+        #     loss_c /= 5.
         loss = loss_l + loss_c
         loss.backward()
         optimizer.step()
@@ -181,10 +184,9 @@ def train():
             print('timer: %.4f sec.' % (t1 - t0))
             print('iter ' + repr(iteration) + ' || Conf: %.4f Loc: %.4f Loss: %.4f ||'
                   % (loss_c.item(), loss_l.item(), loss.item()), end=' ')
-
-        if args.visdom:
-            update_vis_plot(iteration, loss_l.data[0], loss_c.data[0],
-                            iter_plot, epoch_plot, 'append')
+            if args.visdom:
+                update_vis_plot(iteration, loss_l.item(), loss_c.item(),
+                                iter_plot, epoch_plot, 'append')
 
         if iteration != 0 and iteration % 5000 == 0:
             print('Saving state, iter:', iteration)
@@ -205,6 +207,19 @@ def adjust_learning_rate(optimizer, gamma, step):
         param_group['lr'] = lr
 
 
+def adjust_cos_lr(optimizer, cur_iter, max_iter):
+    """Sets the learning rate to the initial LR decayed by 10 at every
+        specified step
+    # Adapted from PyTorch Imagenet example:
+    # https://github.com/pytorch/examples/blob/master/imagenet/main.py
+    """
+    lr = 0.5 * args.lr * (1. + math.cos(cur_iter * math.pi / max_iter))
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+    return lr
+
+
 def xavier(param):
     init.xavier_uniform(param)
 
@@ -213,6 +228,12 @@ def weights_init(m):
     if isinstance(m, nn.Conv2d):
         xavier(m.weight.data)
         m.bias.data.zero_()
+
+
+def weights_init_cls(m):
+    if isinstance(m, nn.Conv2d):
+        xavier(m.weight.data)
+        m.bias.data[:] = -1.9956351946
 
 
 def create_vis_plot(_xlabel, _ylabel, _title, _legend):

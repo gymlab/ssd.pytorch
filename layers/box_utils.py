@@ -47,6 +47,64 @@ def intersect(box_a, box_b):
     return inter[:, :, 0] * inter[:, :, 1]
 
 
+def get_smaller_size_matrix(box):
+    """ We resize both tensors to [A,B,2] without new malloc:
+    [A,2] -> [A,1,2] -> [A,B,2]
+    [B,2] -> [1,B,2] -> [A,B,2]
+    Then we compute the area of intersect between box_a and box_b.
+    Args:
+      box_a: (tensor) bounding boxes, Shape: [A,4].
+      box_b: (tensor) bounding boxes, Shape: [B,4].
+    Return:
+      (tensor) intersection area, Shape: [A,B].
+    """
+    B = box.size(0)
+    wh = box[:, 2:] - box[:, :2]
+    s = wh[:, 0] * wh[:, 1]
+    size_a = s.unsqueeze(1).expand(B, B)
+    size_b = s.unsqueeze(0).expand(B, B)
+    index = size_a < size_b
+
+    return index
+
+
+def get_futher_depth_matrix(depth):
+    """ We resize both tensors to [A,B,2] without new malloc:
+    [A,2] -> [A,1,2] -> [A,B,2]
+    [B,2] -> [1,B,2] -> [A,B,2]
+    Then we compute the area of intersect between box_a and box_b.
+    Args:
+      box_a: (tensor) bounding boxes, Shape: [A,4].
+      box_b: (tensor) bounding boxes, Shape: [B,4].
+    Return:
+      (tensor) intersection area, Shape: [A,B].
+    """
+    D = depth.size(0)
+    depth_a = depth.unsqueeze(1).expand(D, D)
+    depth_b = depth.unsqueeze(0).expand(D, D)
+    index = depth_a > depth_b
+
+    return index
+
+def get_depth_difference(depth):
+    """ We resize both tensors to [A,B,2] without new malloc:
+    [A,2] -> [A,1,2] -> [A,B,2]
+    [B,2] -> [1,B,2] -> [A,B,2]
+    Then we compute the area of intersect between box_a and box_b.
+    Args:
+      box_a: (tensor) bounding boxes, Shape: [A,4].
+      box_b: (tensor) bounding boxes, Shape: [B,4].
+    Return:
+      (tensor) intersection area, Shape: [A,B].
+    """
+    D = depth.size(0)
+    depth_a = depth.unsqueeze(1).expand(D, D)
+    depth_b = depth.unsqueeze(0).expand(D, D)
+    diff = depth_a - depth_b
+
+    return diff
+
+
 def jaccard(box_a, box_b):
     """Compute the jaccard overlap of two sets of boxes.  The jaccard overlap
     is simply the intersection over union of two boxes.  Here we operate on
@@ -66,6 +124,27 @@ def jaccard(box_a, box_b):
               (box_b[:, 3]-box_b[:, 1])).unsqueeze(0).expand_as(inter)  # [A,B]
     union = area_a + area_b - inter
     return inter / union  # [A,B]
+
+
+def involve_min(box_a, box_b):
+    """Compute the jaccard overlap of two sets of boxes.  The jaccard overlap
+    is simply the intersection over union of two boxes.  Here we operate on
+    ground truth boxes and default boxes.
+    E.g.:
+        A ∩ B / A ∪ B = A ∩ B / (area(A) + area(B) - A ∩ B)
+    Args:
+        box_a: (tensor) Ground truth bounding boxes, Shape: [num_objects,4]
+        box_b: (tensor) Prior boxes from priorbox layers, Shape: [num_priors,4]
+    Return:
+        jaccard overlap: (tensor) Shape: [box_a.size(0), box_b.size(0)]
+    """
+    inter = intersect(box_a, box_b)
+    area_a = ((box_a[:, 2]-box_a[:, 0]) *
+              (box_a[:, 3]-box_a[:, 1])).unsqueeze(1).expand_as(inter)  # [A,B]
+    area_b = ((box_b[:, 2]-box_b[:, 0]) *
+              (box_b[:, 3]-box_b[:, 1])).unsqueeze(0).expand_as(inter)  # [A,B]
+    min_area = torch.min(area_a, area_b)
+    return inter / min_area  # [A,B]
 
 
 def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
@@ -107,6 +186,9 @@ def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
             best_truth_idx[best_prior_idx[j]] = j
         matches = truths[best_truth_idx]  # Shape: [num_priors,4]
         conf = labels[best_truth_idx]  # Shape: [num_priors]
+        # Focal loss
+        conf = conf.short()
+        # conf[(best_truth_overlap < threshold) * (best_truth_overlap >= 0.4)] = -1
         conf[best_truth_overlap < threshold] = 0  # label as background
         loc = encode(matches, priors, variances)
         loc_t[idx] = loc  # [num_priors,4] encoded offsets to learn

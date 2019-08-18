@@ -35,7 +35,7 @@ parser.add_argument('--cuda', default=True, type=bool,
                     help='Use cuda to train model')
 parser.add_argument('--cpu', default=False, type=bool,
                     help='Use cpu nms')
-parser.add_argument('--retest', default=True, type=bool,
+parser.add_argument('--retest', default=False, type=bool,
                     help='test cache results')
 args = parser.parse_args()
 
@@ -88,7 +88,7 @@ def test_net(save_folder, net, cuda, testset, transform, max_per_image=300, thre
     det_file = os.path.join(save_folder, 'detections.pkl')
 
     if args.retest:
-        f = open(det_file,'rb')
+        f = open(det_file, 'rb')
         all_boxes = pickle.load(f)
         print('Evaluating detections')
         testset.evaluate_detections(all_boxes, save_folder)
@@ -219,8 +219,8 @@ if __name__ == '__main__':
     else:
         net = net.cpu()
     # evaluation
-    #top_k = (300, 200)[args.dataset == 'COCO']
-    #top_k = 200
+    top_k = (300, 200)[args.dataset == 'COCO']
+    # top_k = 200
     save_folder = os.path.join(args.save_folder, args.dataset)
 
     test_net(save_folder, net, args.cuda, testset,
