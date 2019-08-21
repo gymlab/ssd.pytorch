@@ -6,10 +6,11 @@ from layers import *
 from data import voc, coco
 import os
 from layers.modules.gcn import MSGCN
+import pickle
 import matplotlib.pyplot as plt
 
 
-class SSD(nn.Module):
+class GSSD(nn.Module):
     """Single Shot Multibox Architecture
     The network is composed of a base VGG network followed by the
     added multibox conv layers.  Each multibox layer branches into
@@ -28,7 +29,7 @@ class SSD(nn.Module):
     """
 
     def __init__(self, phase, size, base, extras, head, num_classes):
-        super(SSD, self).__init__()
+        super(GSSD, self).__init__()
         self.phase = phase
         self.num_classes = num_classes
         self.cfg = (coco, voc)[num_classes == 21]
@@ -41,12 +42,11 @@ class SSD(nn.Module):
         # Layer learns to scale the l2 normalized features from conv4_3
         self.L2Norm = L2Norm(512, 20)
         self.extras = nn.ModuleList(extras)
-
-        self.loc = nn.ModuleList(head[0])
-        self.conf = nn.ModuleList(head[1])
-
-        # Layer for depth
-        self.geo = nn.ModuleList(head[2])
+        self.ms_gcn = MSGCN(self.num_classes, 6, 6, t=0.2, p=0.4, adj_file='')
+        with open('', 'rb') as f:
+            self.word_embedding = pickle.load(f)
+        self.word_embedding = torch.autograd.Variable(self.word_embedding).float().detach()
+        self.hub = nn.ModuleList(head)
 
         if phase == 'test':
             self.softmax = nn.Softmax(dim=-1)
@@ -93,6 +93,8 @@ class SSD(nn.Module):
             x = F.relu(v(x), inplace=True)
             if k % 2 == 1:
                 sources.append(x)
+        
+        # apply ms_gcn
 
         # apply multibox head to source layers
         for (x, l, c, g) in zip(sources, self.loc, self.conf, self.geo):
@@ -181,7 +183,7 @@ def add_extras(cfg, i, batch_norm=False):
     return layers
 
 
-def multibox(vgg, extra_layers, cfg, num_classes):
+def make_hub(vgg, extra_layers, cfg, num_classes):
     loc_layers = []
     conf_layers = []
     geo_layers = []
@@ -200,6 +202,18 @@ def multibox(vgg, extra_layers, cfg, num_classes):
                                   * num_classes, kernel_size=3, padding=1)]
         geo_layers += [nn.Conv2d(v.out_channels, cfg[k], kernel_size=3, padding=1)]
     return vgg, extra_layers, (loc_layers, conf_layers, geo_layers)
+
+
+def make_hub(vgg, extra_layers):
+    hub_layers = []
+    vgg_source = [21, -2]
+    for k, v in enumerate(vgg_source):
+        hub_layers += [nn.Conv2d(vgg[v].out_channels, 512, kernel_size=3, padding=1),
+                       nn.ReLU(inplace=True)]
+    for k, v in enumerate(extra_layers[1::2], 2):
+        hub_layers += [nn.Conv2d(v.out_channels, 512, kernel_size=3, padding=1),
+                       nn.ReLU(inplace=True)]
+    return vgg, extra_layers, hub_layers
 
 
 base = {
@@ -225,7 +239,7 @@ def build_ssd(phase, size=300, num_classes=21):
         print("ERROR: You specified size " + repr(size) + ". However, " +
               "currently only SSD300 (size=300) is supported!")
         return
-    base_, extras_, head_ = multibox(vgg(base[str(size)], 3),
+    base_, extras_, head_ = make_hub(vgg(base[str(size)], 3),
                                      add_extras(extras[str(size)], 1024),
                                      mbox[str(size)], num_classes)
-    return SSD(phase, size, base_, extras_, head_, num_classes)
+    return GSSD(phase, size, base_, extras_, head_, num_classes)
