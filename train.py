@@ -2,6 +2,7 @@ from data import *
 from utils.augmentations import SSDAugmentation
 from layers.modules import MultiBoxLoss
 from ssd import build_ssd
+from gssd import build_gssd
 import os
 import sys
 import time
@@ -93,7 +94,9 @@ def train():
                                transform=SSDAugmentation(cfg['min_dim'],
                                                          MEANS))
 
-    ssd_net = build_ssd('train', cfg['min_dim'], cfg['num_classes'])
+    # ssd_net = build_ssd('train', cfg['min_dim'], cfg['num_classes'])
+    # net = ssd_net
+    ssd_net = build_gssd('train', cfg['min_dim'], cfg['num_classes'])
     net = ssd_net
 
     if args.cuda:

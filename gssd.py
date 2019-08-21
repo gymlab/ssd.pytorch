@@ -7,7 +7,6 @@ from data import voc, coco
 import os
 from layers.modules.gcn import MSGCN
 import pickle
-import matplotlib.pyplot as plt
 
 
 class GSSD(nn.Module):
@@ -42,10 +41,10 @@ class GSSD(nn.Module):
         # Layer learns to scale the l2 normalized features from conv4_3
         self.L2Norm = L2Norm(512, 20)
         self.extras = nn.ModuleList(extras)
-        self.ms_gcn = MSGCN(self.num_classes, 6, 6, t=0.2, p=0.4, adj_file='')
-        with open('', 'rb') as f:
-            self.word_embedding = pickle.load(f)
-        self.word_embedding = torch.autograd.Variable(self.word_embedding).float().detach()
+        self.ms_gcn = MSGCN(self.num_classes - 1, 6, 6, t=0.05, p=0.4, adj_file='A.pt')
+        with open('voc_glove_word2vec.pkl', 'rb') as f:
+            self.word_embedding = torch.from_numpy(pickle.load(f))
+        self.word_embedding = torch.autograd.Variable(self.word_embedding).float().cuda().detach()
         self.hub = nn.ModuleList(head)
 
         if phase == 'test':
@@ -72,9 +71,7 @@ class GSSD(nn.Module):
                     3: priorbox layers, Shape: [2,num_priors*4]
         """
         sources = list()
-        loc = list()
-        conf = list()
-        geo = list()
+        hub = list()
 
         # apply vgg up to conv4_3 relu
         for k in range(23):
@@ -94,25 +91,20 @@ class GSSD(nn.Module):
             if k % 2 == 1:
                 sources.append(x)
         
-        # apply ms_gcn
+        # apply hub feature
+        for (x, h) in zip(sources, self.hub):
+            hub.append(h(x))
+
+        # apply
+
 
         # apply multibox head to source layers
         for (x, l, c, g) in zip(sources, self.loc, self.conf, self.geo):
             loc.append(l(x).permute(0, 2, 3, 1).contiguous())
             conf.append(c(x).permute(0, 2, 3, 1).contiguous())
-            if self.phase == 'train':
-                geo.append(g(x).permute(0, 2, 3, 1).contiguous())
-
-        # if self.phase == "train":
-        #     geo.append(self.geo[0](sources[0]).permute(0, 2, 3, 1).contiguous())
-        # else:
-        #     geo = self.geo[0](sources[0])
 
         loc = torch.cat([o.view(o.size(0), -1) for o in loc], 1)
         conf = torch.cat([o.view(o.size(0), -1) for o in conf], 1)
-
-        if self.phase == "train":
-            geo = torch.cat([o.view(o.size(0), -1) for o in geo], 1)
 
         if self.phase == "test":
             output = self.detect(
@@ -231,7 +223,7 @@ mbox = {
 }
 
 
-def build_ssd(phase, size=300, num_classes=21):
+def build_gssd(phase, size=300, num_classes=21):
     if phase != "test" and phase != "train":
         print("ERROR: Phase: " + phase + " not recognized")
         return
@@ -240,6 +232,5 @@ def build_ssd(phase, size=300, num_classes=21):
               "currently only SSD300 (size=300) is supported!")
         return
     base_, extras_, head_ = make_hub(vgg(base[str(size)], 3),
-                                     add_extras(extras[str(size)], 1024),
-                                     mbox[str(size)], num_classes)
+                                     add_extras(extras[str(size)], 1024))
     return GSSD(phase, size, base_, extras_, head_, num_classes)

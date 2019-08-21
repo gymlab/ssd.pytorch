@@ -73,11 +73,12 @@ def gen_A(num_classes, t, p, adj_file):
     _adj = torch.load(adj_file).cuda()
     _nums = _adj.sum(dim=1)
     _nums = _nums.unsqueeze(1).expand_as(_adj)
-    _adj = _adj / _nums
-    _adj[_adj < t] = 0
-    _adj[_adj >= t] = 1
+    _adj = _adj / (_nums + 1e-6)
+    _adj[_adj <= t] = 0
+    _adj[_adj > t] = 1
     _adj = _adj * p / (_adj.sum(0, keepdim=True) + 1e-6)
     _adj = _adj + torch.eye(num_classes)
+    print(_adj[i] for i in range(120))
     return _adj
 
 
@@ -85,4 +86,7 @@ def gen_adj(A):
     D = torch.pow(A.sum(1).float(), -0.5)
     D = torch.diag(D)
     adj = torch.matmul(torch.matmul(A, D).t(), D)
+    # adj = adj.cpu().numpy()
+    # for i in range(120):
+    #     print(adj[i, :], sep='\n')
     return adj
