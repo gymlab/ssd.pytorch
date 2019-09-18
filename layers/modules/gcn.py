@@ -19,6 +19,7 @@ class GraphConvolution(nn.Module):
             self.bias = Parameter(torch.Tensor(1, 1, out_features))
         else:
             self.register_parameter('bias', None)
+        # self.bn = nn.BatchNorm1d(out_features)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -30,6 +31,7 @@ class GraphConvolution(nn.Module):
     def forward(self, input, adj):
         support = torch.matmul(input, self.weight)
         output = torch.matmul(adj, support)
+        # output = self.bn(output)
         if self.bias is not None:
             return output + self.bias
         else:
@@ -43,30 +45,28 @@ class MSGCN(nn.Module):
         self.num_scales = num_scales
         self.num_features = num_features
 
-        self.gc_mid = GraphConvolution(in_channel, 1024)
-        self.gc_weight = GraphConvolution(1024, 512)
-        self.gc_bias = GraphConvolution(1024, 512)
-        self.relu = nn.LeakyReLU(0.2)
-        self.ms_aggregate_weight = nn.Linear(num_classes * num_scales, num_features)
-        self.ms_aggregate_bias = nn.Linear(num_classes * num_scales, num_features)
+        self.gc1 = GraphConvolution(in_channel, 1024)
+        self.gc2 = GraphConvolution(1024, 1024)
+        self.gc3 = GraphConvolution(1024, 1024)
+        self.relu = nn.ReLU(inplace=True)
+        self.ms_aggregate_attention = nn.Sequential(
+            nn.Linear(1024 * 20, 512 + 1024 + 512 + 256 + 256 + 256),
+            nn.Sigmoid())
 
-        _adj = gen_adj(gen_A(num_classes * num_scales, t, p, adj_file))
+        _adj = gen_adj(gen_A(num_classes, t, p, adj_file))
         self.A = Parameter(_adj.float())
         # image normalization
 
     def forward(self, inp):
-        inp = inp[0]
-        inp = inp.repeat(1, self.num_scales)
-        adj = self.A.detach()
-        x = self.gc_mid(inp, adj)
-        x = self.relu(x)
-        weights = self.gc_weight(x, adj)
-        biases = self.gc_bias(x, adj)
+        inp = inp.repeat(1, 1)    # (20, 300)
+        adj = self.A.detach()       # (20, 20)
+        x = self.relu(self.gc1(inp, adj))   # [20, 1024]
+        attention = self.relu(self.gc2(x, adj))    # [20, 1024]
+        attention = self.relu(self.gc3(attention, adj))
 
-        weights = self.ms_aggregate_weight(weights.transpose(0, 1))
-        biases = self.ms_aggregate_bias(biases.transpose(0, 1))
+        attention = self.ms_aggregate_attention(attention.view(1, -1))     # (1, total_channels)
 
-        return weights, biases
+        return attention.squeeze()
 
 
 def gen_A(num_classes, t, p, adj_file):
@@ -78,7 +78,7 @@ def gen_A(num_classes, t, p, adj_file):
     _adj[_adj > t] = 1
     _adj = _adj * p / (_adj.sum(0, keepdim=True) + 1e-6)
     _adj = _adj + torch.eye(num_classes)
-    print(_adj[i] for i in range(120))
+    # print(_adj[i] for i in range(120))
     return _adj
 
 
@@ -87,6 +87,6 @@ def gen_adj(A):
     D = torch.diag(D)
     adj = torch.matmul(torch.matmul(A, D).t(), D)
     # adj = adj.cpu().numpy()
-    # for i in range(120):
+    # for i in range(20):
     #     print(adj[i, :], sep='\n')
     return adj

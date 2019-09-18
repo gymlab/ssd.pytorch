@@ -5,28 +5,29 @@ from torch.autograd import Variable
 from layers import *
 from data import voc, coco
 import os
-from layers.modules.gcn import MSGCN
-import pickle
 
 
-class WIAggregate(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(WIAggregate, self).__init__()
-        self.bn = nn.BatchNorm2d(in_channels)
-        self.relu = nn.ReLU(inplace=True)
-        self.agg = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
+class DisentangleModule(nn.Module):
+    def __init__(self, phase, in_channels):
+        super(DisentangleModule, self).__init__()
+        self.phase = phase
+        self.disentangled_ftrs = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True))
+        self.obj_cls = nn.Sequential(
+            nn.Conv2d(in_channels, 1, kernel_size=3, padding=1),
+            nn.Sigmoid())
 
-    def forward(self, img_feature, word_attention):
-        img_feature = self.bn(img_feature)
-        img_feature = self.relu(word_attention * img_feature)
-        return self.agg(img_feature)
+    def forward(self, x):
+        disentangled_ftrs = self.disentangled_ftrs(x)
+        distilled_ftrs = x - disentangled_ftrs
+        mask = self.obj_cls(disentangled_ftrs)
+        disentangled_ftrs = disentangled_ftrs * mask
+
+        return distilled_ftrs, mask, disentangled_ftrs
 
 
-class GSSD(nn.Module):
+class ESSD(nn.Module):
     """Single Shot Multibox Architecture
     The network is composed of a base VGG network followed by the
     added multibox conv layers.  Each multibox layer branches into
@@ -45,12 +46,14 @@ class GSSD(nn.Module):
     """
 
     def __init__(self, phase, size, base, extras, head, num_classes):
-        super(GSSD, self).__init__()
+        super(ESSD, self).__init__()
         self.phase = phase
         self.num_classes = num_classes
         self.cfg = (coco, voc)[num_classes == 21]
         self.priorbox = PriorBox(self.cfg)
         self.priors = Variable(self.priorbox.forward(), volatile=True)
+        self.priorboxd = PriorBoxDisentangle(self.cfg)
+        self.priorsd = Variable(self.priorboxd.forward(), volatile=True)
         self.size = size
 
         # SSD network
@@ -58,16 +61,19 @@ class GSSD(nn.Module):
         # Layer learns to scale the l2 normalized features from conv4_3
         self.L2Norm = L2Norm(512, 20)
         self.extras = nn.ModuleList(extras)
-        self.ms_gcn = MSGCN(self.num_classes - 1, 6, 6, t=0.4, p=0.2, adj_file='A.pt')
-        with open('voc_glove_word2vec.pkl', 'rb') as f:
-            self.word_embedding = torch.from_numpy(pickle.load(f))
-        self.word_embedding = torch.autograd.Variable(self.word_embedding).float().cuda().detach()
+
         self.loc = nn.ModuleList(head[0])
         self.conf = nn.ModuleList(head[1])
-        self.agg = nn.ModuleList(
-            [WIAggregate(512, 256), WIAggregate(1024, 256), WIAggregate(512, 256),
-             WIAggregate(256, 256), WIAggregate(256, 256), WIAggregate(256, 256)]
-        )
+
+        # Disentanglement
+        disentgle_list = list()
+        disentgle_list += [DisentangleModule(phase, 512)]
+        disentgle_list += [DisentangleModule(phase, 1024)]
+        disentgle_list += [DisentangleModule(phase, 512)]
+        disentgle_list += [DisentangleModule(phase, 256)]
+        disentgle_list += [DisentangleModule(phase, 256)]
+        disentgle_list += [DisentangleModule(phase, 256)]
+        self.disentangle = nn.ModuleList(disentgle_list)
 
         if phase == 'test':
             self.softmax = nn.Softmax(dim=-1)
@@ -93,7 +99,10 @@ class GSSD(nn.Module):
                     3: priorbox layers, Shape: [2,num_priors*4]
         """
         sources = list()
-        att = list()
+        output_maps = list()
+        masks = list()
+        disentagled_ftrs = list()
+
         loc = list()
         conf = list()
 
@@ -101,8 +110,8 @@ class GSSD(nn.Module):
         for k in range(23):
             x = self.vgg[k](x)
 
-        # s = self.L2Norm(x)
-        sources.append(x)
+        s = self.L2Norm(x)
+        sources.append(s)
 
         # apply vgg up to fc7
         for k in range(23, len(self.vgg)):
@@ -115,21 +124,19 @@ class GSSD(nn.Module):
             if k % 2 == 1:
                 sources.append(x)
 
-        # Apply MSGCN
-        gcn_attention = self.ms_gcn(self.word_embedding)
-        att.append(gcn_attention[:512].view(1, 512, 1, 1))
-        att.append(gcn_attention[(512):(512+1024)].view(1, 1024, 1, 1))
-        att.append(gcn_attention[(512+1024):(512+1024+512)].view(1, 512, 1, 1))
-        att.append(gcn_attention[(512+1024+512):(512+1024+512+256)].view(1, 256, 1, 1))
-        att.append(gcn_attention[(512+1024+512+256):(512+1024+512+256+256)].view(1, 256, 1, 1))
-        att.append(gcn_attention[(512+1024+512+256+256):].view(1, 256, 1, 1))
+        # Disentangle
+        for (x, h) in zip(sources, self.disentangle):
+            o, m, d = h(x)
+            output_maps.append(o)
+            masks.append(m.permute(0, 2, 3, 1).contiguous())
+            disentagled_ftrs.append(d)
 
         # apply multibox head to source layers
-        for (x, a, g, l, c) in zip(sources, att, self.agg, self.loc, self.conf):
-            x = g(x, a)
+        for (x, p, l, c) in zip(sources, output_maps, self.loc, self.conf):
             loc.append(l(x).permute(0, 2, 3, 1).contiguous())
-            conf.append(c(x).permute(0, 2, 3, 1).contiguous())
+            conf.append(c(p).permute(0, 2, 3, 1).contiguous())
 
+        masks = torch.cat([o.view(o.size(0), -1) for o in masks], 1)
         loc = torch.cat([o.view(o.size(0), -1) for o in loc], 1)
         conf = torch.cat([o.view(o.size(0), -1) for o in conf], 1)
 
@@ -144,7 +151,10 @@ class GSSD(nn.Module):
             output = (
                 loc.view(loc.size(0), -1, 4),
                 conf.view(conf.size(0), -1, self.num_classes),
-                self.priors
+                self.priors,
+                self.priorsd,
+                disentagled_ftrs,
+                masks.view(masks.size(0), -1)
             )
         return output
 
@@ -202,23 +212,21 @@ def add_extras(cfg, i, batch_norm=False):
 
 
 def multibox(vgg, extra_layers, cfg, num_classes):
-    det_channels = 256
     loc_layers = []
     conf_layers = []
-    # vgg_source = [21, -2]
-    # for k, v in enumerate(vgg_source):
-    #     loc_layers += [nn.Conv2d(vgg[v].out_channels,
-    #                              cfg[k] * 4, kernel_size=3, padding=1)]
-    #     conf_layers += [nn.Conv2d(vgg[v].out_channels,
-    #                     cfg[k] * num_classes, kernel_size=3, padding=1)]
-    # for k, v in enumerate(extra_layers[1::2], 2):
-    #     loc_layers += [nn.Conv2d(v.out_channels, cfg[k]
-    #                              * 4, kernel_size=3, padding=1)]
-    #     conf_layers += [nn.Conv2d(v.out_channels, cfg[k]
-    #                               * num_classes, kernel_size=3, padding=1)]
-    for k in range(6):
-        loc_layers += [nn.Conv2d(det_channels, cfg[k] * 4, kernel_size=3, padding=1)]
-        conf_layers += [nn.Conv2d(det_channels, cfg[k] * num_classes, kernel_size=3, padding=1)]
+
+    vgg_source = [21, -2]
+    # geo_layers += [nn.Conv2d(vgg[21].out_channels, cfg[0], kernel_size=3, padding=1)]
+    for k, v in enumerate(vgg_source):
+        loc_layers += [nn.Conv2d(vgg[v].out_channels,
+                                 cfg[k] * 4, kernel_size=3, padding=1)]
+        conf_layers += [nn.Conv2d(vgg[v].out_channels,
+                        cfg[k] * num_classes, kernel_size=3, padding=1)]
+    for k, v in enumerate(extra_layers[1::2], 2):
+        loc_layers += [nn.Conv2d(v.out_channels, cfg[k]
+                                 * 4, kernel_size=3, padding=1)]
+        conf_layers += [nn.Conv2d(v.out_channels, cfg[k]
+                                  * num_classes, kernel_size=3, padding=1)]
     return vgg, extra_layers, (loc_layers, conf_layers)
 
 
@@ -227,19 +235,17 @@ base = {
             512, 512, 512],
     '512': [],
 }
-
 extras = {
     '300': [256, 'S', 512, 128, 'S', 256, 128, 256, 128, 256],
     '512': [],
 }
-
 mbox = {
-    '300': [6, 6, 6, 6, 6, 6],  # number of boxes per feature map location
+    '300': [4, 6, 6, 6, 4, 4],  # number of boxes per feature map location
     '512': [],
 }
 
 
-def build_gssd(phase, size=300, num_classes=21):
+def build_essd(phase, size=300, num_classes=21):
     if phase != "test" and phase != "train":
         print("ERROR: Phase: " + phase + " not recognized")
         return
@@ -250,4 +256,4 @@ def build_gssd(phase, size=300, num_classes=21):
     base_, extras_, head_ = multibox(vgg(base[str(size)], 3),
                                      add_extras(extras[str(size)], 1024),
                                      mbox[str(size)], num_classes)
-    return GSSD(phase, size, base_, extras_, head_, num_classes)
+    return ESSD(phase, size, base_, extras_, head_, num_classes)

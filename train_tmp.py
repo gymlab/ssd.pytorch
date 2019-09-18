@@ -1,8 +1,8 @@
 from data import *
 from utils.augmentations import SSDAugmentation
-from layers.modules import MultiBoxLoss
+from layers.modules import MultiBoxDisentangledLoss
 from ssd import build_ssd
-from gssd import build_gssd
+from essd import build_essd
 import os
 import sys
 import time
@@ -96,11 +96,18 @@ def train():
 
     # ssd_net = build_ssd('train', cfg['min_dim'], cfg['num_classes'])
     # net = ssd_net
-    ssd_net = build_gssd('train', cfg['min_dim'], cfg['num_classes'])
+    ssd_net = build_essd('train', cfg['min_dim'], cfg['num_classes'])
     net = ssd_net
+
+    # adv
+    adv_net = list()
+    for c in (512, 1024, 512, 256, 256, 256):
+        adv_net.append(nn.Conv2d(c, 20, kernel_size=3, padding=1))
+    adv_net = nn.ModuleList(adv_net)
 
     if args.cuda:
         net = torch.nn.DataParallel(ssd_net)
+        # adv_net = torch.nn.DataParallel(adv_net)
         cudnn.benchmark = True
 
     if args.resume:
@@ -113,6 +120,7 @@ def train():
 
     if args.cuda:
         net = net.cuda()
+        adv_net = adv_net.cuda()
 
     if not args.resume:
         print('Initializing weights...')
@@ -120,11 +128,13 @@ def train():
         ssd_net.extras.apply(weights_init)
         ssd_net.loc.apply(weights_init)
         ssd_net.conf.apply(weights_init)
-        ssd_net.ms_gcn.apply(weights_init)
+        adv_net.apply(weights_init)
 
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum,
                           weight_decay=args.weight_decay)
-    criterion = MultiBoxLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
+    optimizer_d = optim.SGD(adv_net.parameters(), lr=args.lr, momentum=args.momentum,
+                          weight_decay=args.weight_decay)
+    criterion = MultiBoxDisentangledLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
                              False, args.cuda)
 
     net.train()
@@ -173,10 +183,20 @@ def train():
             targets = [ann for ann in targets]
         # forward
         t0 = time.time()
-        out = net(images)
+        loc, conf, priors, priorsd, disen, mask = net(images)
+
+        # Train discriminator
+        disentangled_ftrs = list()
+        for (d, a) in zip(disen, adv_net):
+            disentangled_ftrs.append(a(d).permute(0, 2, 3, 1).contiguous())
+        disentangled_ftrs = torch.cat([o.view(o.size(0), -1) for o in disentangled_ftrs], 1)
+
+        out = (loc, conf, priors, priorsd, disentangled_ftrs, mask)
+
+        # out = net(images)
         # backprop
         optimizer.zero_grad()
-        loss_l, loss_c = criterion(out, targets)
+        loss_l, loss_c, _, _, _ = criterion(out, targets)
         # if iteration < 500:
         #     loss_c /= 5.
         loss = loss_l + loss_c

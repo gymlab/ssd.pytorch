@@ -60,7 +60,7 @@ data_loader = data.DataLoader(dataset, batch_size,
                               shuffle=False, collate_fn=detection_collate,
                               pin_memory=True, drop_last=False)
 
-occurrence_matrix = torch.zeros(20 * 6, 20 * 6)
+occurrence_matrix = torch.zeros(20, 20)
 
 # create batch iterator
 for iteration, batch_data in enumerate(data_loader):
@@ -78,24 +78,24 @@ for iteration, batch_data in enumerate(data_loader):
     for _, b_target in enumerate(targets):
         co_labels = []
         for n in range(b_target.size(0)):
-            radius = torch.sqrt((b_target[n, 2] - b_target[n, 0]) * (b_target[n, 3] - b_target[n, 1]))
+            # radius = torch.sqrt((b_target[n, 2] - b_target[n, 0]) * (b_target[n, 3] - b_target[n, 1]))
             cls = b_target[n, 4:].item()
-            if radius < 0.1:
-                idx = 0
-            elif radius < 0.3:
-                idx = 1
-            elif radius < 0.5:
-                idx = 2
-            elif radius < 0.7:
-                idx = 3
-            elif radius < 0.9:
-                idx = 4
-            else:
-                idx = 5
+            # if radius < 0.1:
+            #     idx = 0
+            # elif radius < 0.3:
+            #     idx = 1
+            # elif radius < 0.5:
+            #     idx = 2
+            # elif radius < 0.7:
+            #     idx = 3
+            # elif radius < 0.9:
+            #     idx = 4
+            # else:
+            #     idx = 5
 
-            co_labels += [20 * idx + cls - 1]
+            co_labels += [cls - 1]
         idx = torch.tensor(co_labels).long()
-        one_hots = torch.zeros(len(idx), 20 * 6).scatter_(1, idx.unsqueeze(1), 1.)
+        one_hots = torch.zeros(len(idx), 20).scatter_(1, idx.unsqueeze(1), 1.)
         occurrence, _ = one_hots.max(dim=0)
         occurrence_matrix += torch.matmul(occurrence.unsqueeze(1), occurrence.unsqueeze(0))
 
